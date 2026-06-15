@@ -22,6 +22,7 @@ type fakeFacilitatorSigner struct {
 	verifyTypedData func(address string) (bool, error)
 	readContract    func(functionName string, args ...interface{}) (interface{}, error)
 	writeContract   func(functionName string, args ...interface{}) (string, error)
+	getCode         func(address string) ([]byte, error)
 	verifyCalls     int
 	verifyAddrs     []string
 	writeCalls      int
@@ -64,8 +65,11 @@ func (f *fakeFacilitatorSigner) GetChainID(_ context.Context) (*big.Int, error) 
 	}
 	return big.NewInt(8453), nil
 }
-func (f *fakeFacilitatorSigner) GetCode(_ context.Context, _ string) ([]byte, error) {
-	return nil, nil
+func (f *fakeFacilitatorSigner) GetCode(_ context.Context, address string) ([]byte, error) {
+	if f.getCode != nil {
+		return f.getCode(address)
+	}
+	return nil, nil // default: EOA (no code)
 }
 
 // fakeAuthorizerSigner is a no-op AuthorizerSigner.

@@ -186,8 +186,19 @@ func (f *ExactEvmScheme) settleEIP3009(
 				return nil, x402.NewSettleError(ErrFactoryNotAllowed, verifyResp.Payer, network, "", "")
 			}
 
-			if err := DeploySmartWallet(ctx, f.signer, sigData); err != nil {
+			if err := SendDeployTransaction(ctx, f.signer, sigData); err != nil {
 				return nil, x402.NewSettleError(ErrSmartWalletDeploymentFailed, verifyResp.Payer, network, "", err.Error())
+			}
+
+			// Post-deploy: some ERC-7579 / Kernel wallets install validators lazily, so the
+			// factory-deployed wallet may reject the inner sig. Simulate before paying gas.
+			parsedForSim, err := ParseEIP3009Authorization(evmPayload.Authorization)
+			if err != nil {
+				return nil, x402.NewSettleError(ErrInvalidPayload, verifyResp.Payer, network, "", err.Error())
+			}
+			innerOnly := &evm.ERC6492SignatureData{InnerSignature: sigData.InnerSignature}
+			if ok, _ := SimulateEIP3009Transfer(ctx, f.signer, tokenAddress, parsedForSim, innerOnly); !ok {
+				return nil, x402.NewSettleError(ErrDeployedInnerWalletSignatureUnsupported, verifyResp.Payer, network, "", MsgDeployedInnerWalletSignatureUnsupported)
 			}
 		}
 	}

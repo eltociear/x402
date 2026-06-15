@@ -59,6 +59,7 @@ from ..exact.permit2_utils import (  # noqa: E402
     _verify_permit2_allowance,
 )
 from ..signer import FacilitatorEvmSigner  # noqa: E402
+from ..verify import verify_typed_data_strict  # noqa: E402
 from ..types import (  # noqa: E402
     TypedDataField,
     UptoPermit2Payload,
@@ -811,7 +812,9 @@ def _verify_upto_permit2_signature(
         permit2_authorization, chain_id
     )
 
-    return signer.verify_typed_data(
+    # Uses the strict primitive that mirrors on-chain SignatureChecker (code-routed, no ECDSA fallback).
+    return verify_typed_data_strict(
+        signer,
         payer,
         domain_dict,  # type: ignore[arg-type]
         typed_fields,

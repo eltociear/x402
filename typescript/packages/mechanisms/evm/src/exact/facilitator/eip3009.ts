@@ -12,6 +12,7 @@ import { getEvmChainId } from "../../utils";
 import { ExactEIP3009Payload } from "../../types";
 import * as Errors from "./errors";
 import { resolveDataSuffix } from "../../shared/extensions";
+import { verifyTypedDataSignature, classifyErc6492Payer } from "../../shared/verifySignature";
 import {
   diagnoseEip3009SimulationFailure,
   executeTransferWithAuthorization,
@@ -85,7 +86,7 @@ export async function verifyEIP3009(
     };
   }
 
-  const { name, version } = requirements.extra;
+  const { name, version } = requirements.extra as { name: string; version: string };
   const erc20Address = getAddress(requirements.asset);
 
   // Verify network matches
@@ -117,65 +118,38 @@ export async function verifyEIP3009(
     },
   };
 
-  // Verify signature
-  // Note: verifyTypedData is implementation-dependent and pluggable on FacilitatorEvmSigner
-  // Some implementations only do EOA-style ECDSA recovery (e.g. viem/utils verifyTypedData, ethers.verifyTypedData)
-  // Viem's publicClient.verifyTypedData supports EOA and Smart Contract Account (ERC-1271 / ERC-6492) signature verification
-  let isValid = false;
-  try {
-    isValid = await signer.verifyTypedData({
+  const signature = eip3009Payload.signature!;
+
+  // Classify the payer: fetch code once, parse ERC-6492 wrapper, determine counterfactual.
+  // Using classifyErc6492Payer avoids duplicating this block across eip3009.ts / v1/scheme.ts.
+  const { isCounterfactual, innerSignature, eip6492Deployment: classification6492 } =
+    await classifyErc6492Payer(signer, signature, payer);
+
+  if (classification6492) {
+    eip6492Deployment = classification6492;
+  }
+
+  if (!isCounterfactual) {
+    // For deployed addresses (plain EOA, smart contract, 7702 EOA): verify the
+    // signature using a strict primitive that mirrors on-chain SignatureChecker
+    // semantics — ecrecover when no code, strict EIP-1271 when code is present.
+    // No ECDSA fallback for code addresses; that fallback causes pre-verify to
+    // accept sigs the on-chain token rejects (empirically confirmed on Base Sepolia).
+    const isValid = await verifyTypedDataSignature(signer, {
       address: eip3009Payload.authorization.from,
       ...permitTypedData,
-      signature: eip3009Payload.signature!,
+      signature: innerSignature,
     });
-  } catch {
-    isValid = false;
-  }
-  const signature = eip3009Payload.signature!;
-  const sigLen = signature.startsWith("0x") ? signature.length - 2 : signature.length;
-
-  // Extract EIP-6492 deployment info (factory address + calldata) if present
-  const erc6492Data = parseErc6492Signature(signature);
-  const hasDeploymentInfo =
-    erc6492Data.address &&
-    erc6492Data.data &&
-    !isAddressEqual(erc6492Data.address, "0x0000000000000000000000000000000000000000");
-
-  if (hasDeploymentInfo) {
-    eip6492Deployment = {
-      factoryAddress: erc6492Data.address!,
-      factoryCalldata: erc6492Data.data!,
-    };
-  }
-
-  if (!isValid) {
-    // Check if signature is from a smart wallet
-    const isSmartWallet = sigLen > 130; // 65 bytes = 130 hex chars for EOA
-
-    // EOA signature that failed verification — definitely invalid
-    if (!isSmartWallet) {
+    if (!isValid) {
       return {
         isValid: false,
         invalidReason: Errors.ErrInvalidSignature,
         payer,
       };
     }
-
-    // Smart wallet signature: check if deployed or has ERC-6492 deployment info
-    const bytecode = await signer.getCode({ address: payer });
-    const isDeployed = bytecode && bytecode !== "0x";
-
-    if (!isDeployed && !hasDeploymentInfo) {
-      // Undeployed smart wallet with no factory info
-      return {
-        isValid: false,
-        invalidReason: Errors.ErrUndeployedSmartWallet,
-        payer,
-      };
-    }
-    // Deployed smart wallet or undeployed with ERC-6492 factory info
-    // fall through to remaining field checks and onchain simulation
   }
+  // Counterfactual: skip pre-verify and defer to on-chain simulation/settle which
+  // deploys the factory first then atomically validates the signature.
 
   // Verify payment recipient matches
   if (getAddress(eip3009Payload.authorization.to) !== getAddress(requirements.payTo)) {
@@ -284,10 +258,11 @@ export async function settleEIP3009(
   }
 
   try {
-    // Parse ERC-6492 signature if applicable (for optional deployment)
-    const { address: factoryAddress, data: factoryCalldata } = parseErc6492Signature(
-      eip3009Payload.signature!,
-    );
+    // Parse ERC-6492 signature if applicable (for optional deployment).
+    // Keep the full result so we can access the inner signature later for
+    // the post-deploy transfer simulation.
+    const settleErc6492Data = parseErc6492Signature(eip3009Payload.signature!);
+    const { address: factoryAddress, data: factoryCalldata, signature: erc6492InnerSig } = settleErc6492Data;
 
     // Deploy ERC-4337 smart wallet via EIP-6492 if factory is in the allowlist
     if (
@@ -319,8 +294,40 @@ export async function settleEIP3009(
           data: factoryCalldata as Hex,
         });
 
-        // Wait for deployment transaction
-        await signer.waitForTransactionReceipt({ hash: deployTx });
+        // Wait for deployment and check whether it actually succeeded.
+        // A reverted factory tx would silently proceed without this check, misclassifying
+        // the downstream transfer failure as an invalid-signature error.
+        const deployReceipt = await signer.waitForTransactionReceipt({ hash: deployTx });
+        if (deployReceipt.status !== "success") {
+          return {
+            success: false,
+            errorReason: Errors.ErrSmartWalletDeploymentFailed,
+            transaction: "",
+            network: payload.accepted.network,
+            payer,
+          };
+        }
+
+        // Post-deploy: some ERC-7579 / Kernel wallets install validators lazily, so the
+        // factory-deployed wallet may reject the inner sig. Simulate before paying gas.
+        const innerSigForSimulation = erc6492InnerSig ?? eip3009Payload.signature!;
+        const postDeployPayload = { ...eip3009Payload, signature: innerSigForSimulation };
+        const postDeploySimOk = await simulateEip3009Transfer(
+          signer,
+          getAddress(requirements.asset),
+          postDeployPayload,
+          // No eip6492Deployment: wallet is already deployed, simulate transfer only.
+        );
+        if (!postDeploySimOk) {
+          return {
+            success: false,
+            errorReason: Errors.ErrDeployedInnerWalletSignatureUnsupported,
+            errorMessage: Errors.DeployedInnerWalletSignatureUnsupportedMessage,
+            transaction: "",
+            network: payload.accepted.network,
+            payer,
+          };
+        }
       }
     }
 

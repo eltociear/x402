@@ -326,6 +326,17 @@ ERR_ASSET_NOT_DEPLOYED_CONTRACT = "asset_not_deployed_contract"
 ERR_INVALID_SIGNATURE = "invalid_exact_evm_payload_signature"
 ERR_UNDEPLOYED_SMART_WALLET = "invalid_exact_evm_payload_undeployed_smart_wallet"
 ERR_SMART_WALLET_DEPLOYMENT_FAILED = "smart_wallet_deployment_failed"
+# Returned when the ERC-6492 factory deployed the wallet but the deployed wallet rejected the
+# inner signature — the validator/plugin needed to verify it was not active at deployment (common
+# for ERC-7579 / Kernel wallets whose session-key validator is installed lazily). The wallet now
+# exists on-chain, so a retry with a standard ERC-1271 signature should settle.
+ERR_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED = "eip6492_deployed_inner_wallet_signature_unsupported"
+MSG_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED = (
+    "Smart wallet was deployed from its ERC-6492 counterfactual address, but the deployed wallet "
+    "rejected the inner signature — the validator/plugin needed to verify it was not active at "
+    "deployment. The wallet is now deployed; retry the payment and the wallet should produce a "
+    "standard ERC-1271 signature that settles."
+)
 ERR_FACTORY_NOT_ALLOWED = "eip6492_factory_not_allowed"
 ERR_RECIPIENT_MISMATCH = "invalid_exact_evm_payload_recipient_mismatch"
 ERR_AUTHORIZATION_VALUE_MISMATCH = "invalid_exact_evm_payload_authorization_value_mismatch"

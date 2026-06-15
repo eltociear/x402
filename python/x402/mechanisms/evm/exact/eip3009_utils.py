@@ -29,6 +29,7 @@ from ..multicall import MulticallCall, encode_contract_call, multicall
 from ..signer import FacilitatorEvmSigner
 from ..types import ERC6492SignatureData, ExactEIP3009Authorization
 from ..utils import bytes_to_hex, hex_to_bytes
+from ..verify import verify_typed_data_strict
 
 
 @dataclass
@@ -91,7 +92,9 @@ def classify_eip3009_signature(
     )
 
     is_smart_wallet = has_deployment_info(sig_data) or len(sig_data.inner_signature) != 65
-    valid = signer.verify_typed_data(
+    # Uses the strict primitive that mirrors on-chain SignatureChecker (code-routed, no ECDSA fallback).
+    valid = verify_typed_data_strict(
+        signer,
         authorization.from_address,
         domain,
         types,

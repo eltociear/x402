@@ -6,6 +6,7 @@ import { ERC3009_DEPOSIT_COLLECTOR_ADDRESS, receiveAuthorizationTypes } from "..
 import { buildErc3009CollectorData, buildErc3009DepositNonce } from "../encoding";
 import * as Errors from "../errors";
 import { erc3009AuthorizationTimeInvalidReason } from "./utils";
+import { verifyTypedDataSignature } from "../../shared/verifySignature";
 
 /**
  * Returns the collector contract used for EIP-3009 deposits.
@@ -70,6 +71,12 @@ export async function verifyEip3009DepositAuthorization(
   }
 
   const erc3009Nonce = buildErc3009DepositNonce(voucher.channelId, auth.salt);
+  // Strip the ERC-6492 wrapper (if present) before verification — verifyReceiveAuth
+  // passes the signature directly to signer.readContract isValidSignature, and most
+  // wallet implementations do not parse ERC-6492 envelopes inside isValidSignature.
+  // buildEip3009DepositCollectorData (the settle path) already strips via parseErc6492Signature;
+  // this keeps verify and settle consistent.
+  const { signature: innerSig } = parseErc6492Signature(auth.signature);
   const receiveAuthOk = await verifyReceiveAuth(signer, {
     payer,
     asset: requirements.asset,
@@ -80,7 +87,7 @@ export async function verifyEip3009DepositAuthorization(
     validAfter,
     validBefore,
     nonce: erc3009Nonce,
-    signature: auth.signature,
+    signature: innerSig,
   });
 
   if (!receiveAuthOk) {
@@ -122,28 +129,29 @@ async function verifyReceiveAuth(
     signature: `0x${string}`;
   },
 ): Promise<boolean> {
-  try {
-    return await signer.verifyTypedData({
-      address: getAddress(params.payer),
-      domain: {
-        name: params.name,
-        version: params.version,
-        chainId: params.chainId,
-        verifyingContract: getAddress(params.asset),
-      },
-      types: receiveAuthorizationTypes,
-      primaryType: "ReceiveWithAuthorization",
-      message: {
-        from: getAddress(params.payer),
-        to: getAddress(ERC3009_DEPOSIT_COLLECTOR_ADDRESS),
-        value: BigInt(params.amount),
-        validAfter: params.validAfter,
-        validBefore: params.validBefore,
-        nonce: params.nonce,
-      },
-      signature: params.signature,
-    });
-  } catch {
-    return false;
-  }
+  // Mirror the token's on-chain ERC-3009 signature check. Modern tokens (USDC v2.2)
+  // use a SignatureChecker that routes by code.length: ECDSA for EOAs, strict
+  // EIP-1271 for any address with code (including 7702-delegated EOAs). No
+  // ECDSA fallback for code addresses — that fallback would accept sigs the
+  // token rejects on-chain.
+  return verifyTypedDataSignature(signer, {
+    address: getAddress(params.payer),
+    domain: {
+      name: params.name,
+      version: params.version,
+      chainId: params.chainId,
+      verifyingContract: getAddress(params.asset),
+    },
+    types: receiveAuthorizationTypes,
+    primaryType: "ReceiveWithAuthorization",
+    message: {
+      from: getAddress(params.payer),
+      to: getAddress(ERC3009_DEPOSIT_COLLECTOR_ADDRESS),
+      value: BigInt(params.amount),
+      validAfter: params.validAfter,
+      validBefore: params.validBefore,
+      nonce: params.nonce,
+    },
+    signature: params.signature,
+  });
 }

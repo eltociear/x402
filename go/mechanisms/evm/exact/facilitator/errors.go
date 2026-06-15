@@ -40,8 +40,20 @@ const (
 	// Smart wallet errors (shared by EIP-3009 and Permit2)
 	ErrUndeployedSmartWallet       = "invalid_exact_evm_payload_undeployed_smart_wallet"
 	ErrSmartWalletDeploymentFailed = "smart_wallet_deployment_failed"
-	ErrFactoryNotAllowed           = "eip6492_factory_not_allowed"
-	ErrUnsupportedPayloadType      = "unsupported_payload_type"
+	// ErrDeployedInnerWalletSignatureUnsupported is returned when the ERC-6492 factory
+	// deployed the wallet but the deployed wallet rejected the inner signature — the
+	// validator/plugin needed to verify it was not active at deployment (common for
+	// ERC-7579 / Kernel wallets whose session-key validator is installed lazily). The
+	// wallet now exists on-chain, so a retry with a standard ERC-1271 signature should settle.
+	ErrDeployedInnerWalletSignatureUnsupported = "eip6492_deployed_inner_wallet_signature_unsupported"
+	// MsgDeployedInnerWalletSignatureUnsupported is the human-readable explanation for
+	// ErrDeployedInnerWalletSignatureUnsupported, surfaced via the settle error message.
+	MsgDeployedInnerWalletSignatureUnsupported = "Smart wallet was deployed from its ERC-6492 counterfactual address, " +
+		"but the deployed wallet rejected the inner signature — the validator/plugin needed to verify it was not " +
+		"active at deployment. The wallet is now deployed; retry the payment and the wallet should produce a " +
+		"standard ERC-1271 signature that settles."
+	ErrFactoryNotAllowed      = "eip6492_factory_not_allowed"
+	ErrUnsupportedPayloadType = "unsupported_payload_type"
 
 	// Permit2 verify errors — canonical values live in evm.ErrPermit2*
 	ErrPermit2InvalidSpender    = evm.ErrPermit2InvalidSpender

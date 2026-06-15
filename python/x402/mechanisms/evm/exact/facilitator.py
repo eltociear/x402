@@ -14,6 +14,7 @@ from ....schemas import (
 from ..constants import (
     ERR_ASSET_NOT_DEPLOYED_CONTRACT,
     ERR_AUTHORIZATION_VALUE_MISMATCH,
+    ERR_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED,
     ERR_FACTORY_NOT_ALLOWED,
     ERR_FAILED_TO_GET_NETWORK_CONFIG,
     ERR_FAILED_TO_VERIFY_SIGNATURE,
@@ -27,6 +28,7 @@ from ..constants import (
     ERR_UNSUPPORTED_SCHEME,
     ERR_VALID_AFTER_FUTURE,
     ERR_VALID_BEFORE_EXPIRED,
+    MSG_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED,
     SCHEME_EXACT,
     TX_STATUS_SUCCESS,
 )
@@ -365,6 +367,25 @@ class ExactEvmScheme:
                         success=False,
                         error_reason=ERR_SMART_WALLET_DEPLOYMENT_FAILED,
                         error_message=str(e),
+                        network=network,
+                        payer=payer,
+                        transaction="",
+                    )
+
+                # Post-deploy: some ERC-7579 / Kernel wallets install validators lazily, so
+                # the factory-deployed wallet may reject the inner sig. Simulate first.
+                inner_only = ERC6492SignatureData(
+                    factory=bytes(20),
+                    factory_calldata=b"",
+                    inner_signature=sig_data.inner_signature,
+                )
+                if not simulate_eip3009_transfer(
+                    self._signer, token_address, parsed_authorization, inner_only
+                ):
+                    return SettleResponse(
+                        success=False,
+                        error_reason=ERR_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED,
+                        error_message=MSG_DEPLOYED_INNER_WALLET_SIGNATURE_UNSUPPORTED,
                         network=network,
                         payer=payer,
                         transaction="",

@@ -31,6 +31,24 @@ const mockGetCodeEOAPayer =
         : ("0x" as `0x${string}`),
     );
 
+// Wraps a readContract mock so isValidSignature returns the ERC-1271 magic value
+// while delegating other calls to `impl`. Keeps "default: valid sig" semantics
+// for tests that override readContract for other purposes (nonce, allowance, etc.).
+const sigValid = "0x1626ba7e";
+const sigInvalid = "0xffffffff";
+function rcWithSig(
+  impl: unknown | ((args: { address?: string; functionName?: string }) => unknown),
+  sigResponse: string = sigValid,
+) {
+  return vi.fn().mockImplementation(async (args: { address?: string; functionName?: string }) => {
+    if (args?.functionName === "isValidSignature") return sigResponse;
+    if (typeof impl === "function") {
+      return (impl as (a: typeof args) => unknown)(args);
+    }
+    return impl;
+  });
+}
+
 describe("ExactEvmScheme (Facilitator)", () => {
   let facilitator: ExactEvmScheme;
   let mockFacilitatorSigner: FacilitatorEvmSigner;
@@ -46,11 +64,15 @@ describe("ExactEvmScheme (Facilitator)", () => {
     };
     client = new ClientExactEvmScheme(mockClientSigner);
 
-    // Create mock facilitator signer
+    // Create mock facilitator signer. readContract returns the ERC-1271 magic value for
+    // isValidSignature (contract-account path) and 0n for everything else (nonce, etc.).
     mockFacilitatorSigner = {
-      getAddresses: vi.fn().mockReturnValue(["0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"]),
-      readContract: vi.fn().mockResolvedValue(0n), // Mock nonce state
-      verifyTypedData: vi.fn().mockResolvedValue(true), // Mock signature verification
+      getAddresses: vi.fn().mockReturnValue(["0x742D35CC6634c0532925A3b844BC9E7595F0BEb0"]),
+      readContract: vi.fn().mockImplementation(async (args: { functionName: string }) => {
+        if (args?.functionName === "isValidSignature") return "0x1626ba7e";
+        return 0n;
+      }),
+      verifyTypedData: vi.fn().mockResolvedValue(true),
       writeContract: vi.fn().mockResolvedValue("0xtxhash"),
       sendTransaction: vi.fn().mockResolvedValue("0xtxhash"),
       waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "success" }),
@@ -69,13 +91,13 @@ describe("ExactEvmScheme (Facilitator)", () => {
   });
 
   describe("verify", () => {
-    it("should call verifyTypedData for signature verification", async () => {
+    it("should run signature verification through the strict primitive (getCode + isValidSignature for contract addresses)", async () => {
       const requirements: PaymentRequirements = {
         scheme: "exact",
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: {
           name: "USDC",
@@ -94,8 +116,15 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
       await facilitator.verify(fullPayload, requirements);
 
-      // Should have called verifyTypedData
-      expect(mockFacilitatorSigner.verifyTypedData).toHaveBeenCalled();
+      // Signature verification now mirrors on-chain SignatureChecker:
+      // it calls getCode on the payer; for addresses with code (the default mock
+      // returns deployed bytecode) it calls readContract({ functionName: "isValidSignature" }).
+      expect(mockFacilitatorSigner.getCode).toHaveBeenCalledWith(
+        expect.objectContaining({ address: mockClientSigner.address }),
+      );
+      expect(mockFacilitatorSigner.readContract).toHaveBeenCalledWith(
+        expect.objectContaining({ functionName: "isValidSignature" }),
+      );
     });
 
     it("should reject if scheme doesn't match", async () => {
@@ -104,7 +133,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -138,7 +167,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: {}, // Missing name and version
       };
@@ -166,7 +195,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -193,7 +222,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -224,7 +253,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -255,7 +284,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -281,13 +310,13 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
 
       // Simulation of settle() on the proxy succeeds (readContract doesn't throw)
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const permit2Payload: PaymentPayload = {
         x402Version: 2,
@@ -324,15 +353,13 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
 
       // Simulation fails (settle throws), diagnostic multicall returns proxy OK, balance OK, allowance 0
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === x402ExactPermit2ProxyAddress) {
             return Promise.reject(new Error("execution reverted"));
           }
@@ -391,7 +418,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
@@ -432,7 +459,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
@@ -473,7 +500,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
@@ -516,13 +543,13 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
 
       // settle's re-verify has simulate=false (default), so no simulation readContract needed
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const permit2Payload: PaymentPayload = {
         x402Version: 2,
@@ -561,7 +588,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" },
       };
@@ -610,7 +637,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 300,
         extra: { name: "USDC", version: "2" },
       };
@@ -671,14 +698,14 @@ describe("ExactEvmScheme (Facilitator)", () => {
   describe("EIP-2612 Gas Sponsoring - Verify", () => {
     it("should accept valid EIP-2612 extension when settleWithPermit simulation succeeds", async () => {
       // Simulation of settleWithPermit on proxy succeeds
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const permit2Requirements: PaymentRequirements = {
         scheme: "exact",
         network: "eip155:84532",
         amount: "1000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 60,
         extra: { assetTransferMethod: "permit2", name: "USDC", version: "2" },
       };
@@ -723,9 +750,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should reject when simulation fails and no extension present (allowance insufficient)", async () => {
       // Simulation fails, diagnostic multicall returns low allowance
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === x402ExactPermit2ProxyAddress) {
             return Promise.reject(new Error("execution reverted"));
           }
@@ -753,7 +778,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
         network: "eip155:84532",
         amount: "1000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 60,
         extra: { assetTransferMethod: "permit2", name: "USDC", version: "2" },
       };
@@ -778,14 +803,14 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject EIP-2612 extension with wrong spender", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const permit2Requirements: PaymentRequirements = {
         scheme: "exact",
         network: "eip155:84532",
         amount: "1000",
         asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+        payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
         maxTimeoutSeconds: 60,
         extra: { assetTransferMethod: "permit2", name: "USDC", version: "2" },
       };
@@ -847,7 +872,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       network: "eip155:84532",
       amount: "1000000",
       asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-      payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
       maxTimeoutSeconds: 300,
       extra: { name: "USDC", version: "2" },
     };
@@ -882,9 +907,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -905,9 +928,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -930,9 +951,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -953,9 +972,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -986,9 +1003,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -1015,9 +1030,46 @@ describe("ExactEvmScheme (Facilitator)", () => {
       expect(result.payer).toBe(erc6492Payer);
     });
 
-    it("should reject undeployed smart wallet without ERC-6492 deployment info", async () => {
+    it("settle returns ErrDeployedInnerWalletSignatureUnsupported when the deployed wallet rejects the inner sig", async () => {
+      // Counterfactual wallet whose validator/plugin is not installed by the factory:
+      // deployment succeeds, but the post-deploy transfer simulation reverts because
+      // the deployed wallet's isValidSignature rejects the inner signature. settle must
+      // surface the retry-guidance error rather than submitting a doomed transfer.
+      const facilitatorWithFactory = new ExactEvmScheme(mockFacilitatorSigner, {
+        eip6492AllowedFactories: [factory],
+      });
+      // payer undeployed ("0x"), asset deployed (so verify's asset-code check passes).
+      mockFacilitatorSigner.getCode = vi
+        .fn()
+        .mockImplementation(mockGetCodeEOAPayer(erc6492Requirements.asset));
+      mockFacilitatorSigner.sendTransaction = vi.fn().mockResolvedValue("0xdeploytx");
+      mockFacilitatorSigner.waitForTransactionReceipt = vi
+        .fn()
+        .mockResolvedValue({ status: "success" });
+      // Post-deploy transfer simulation reverts → simulateEip3009Transfer returns false.
+      mockFacilitatorSigner.readContract = rcWithSig(
+        ({ functionName }: { functionName?: string }) => {
+          if (functionName === "transferWithAuthorization") {
+            return Promise.reject(new Error("execution reverted: invalid signature"));
+          }
+          return Promise.resolve(BigInt("10000000"));
+        },
+      );
+
+      const result = await facilitatorWithFactory.settle(
+        makeERC6492Payload(erc6492Sig),
+        erc6492Requirements,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errorReason).toBe(Errors.ErrDeployedInnerWalletSignatureUnsupported);
+      expect(result.errorMessage).toBe(Errors.DeployedInnerWalletSignatureUnsupportedMessage);
+      // No transfer was submitted (only the deploy tx) — the doomed transfer was caught.
+      expect(result.transaction).toBe("");
+    });
+
+    it("should reject non-ERC-6492 long signature against undeployed wallet", async () => {
       const longNonERC6492Sig = ("0x" + "ab".repeat(100)) as `0x${string}`;
-      mockFacilitatorSigner.verifyTypedData = vi.fn().mockResolvedValue(false);
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
@@ -1027,17 +1079,21 @@ describe("ExactEvmScheme (Facilitator)", () => {
         erc6492Requirements,
       );
 
+      // Strict primitive: payer has no code → ECDSA path → 100-byte sig is not a
+      // valid ECDSA signature → rejected as invalid_signature. Previously this
+      // returned ErrUndeployedSmartWallet because the OLD heuristic treated any
+      // sig > 65 bytes as a smart-wallet sig and routed via getCode, which then
+      // saw no code and no factory info. The new behavior is closer to on-chain:
+      // a long sig sent to an EOA address is just an invalid signature.
       expect(result.isValid).toBe(false);
-      expect(result.invalidReason).toBe("invalid_exact_evm_payload_undeployed_smart_wallet");
+      expect(result.invalidReason).toBe(Errors.ErrInvalidSignature);
       expect(result.payer).toBe(erc6492Payer);
     });
 
     it("should accept deployed smart wallet when verifyTypedData fails but simulation passes (ERC-1271)", async () => {
       mockFacilitatorSigner.verifyTypedData = vi.fn().mockResolvedValue(false);
       mockFacilitatorSigner.getCode = vi.fn().mockResolvedValue("0x6080604052");
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               { success: true, returnData: "0x" },
@@ -1053,17 +1109,20 @@ describe("ExactEvmScheme (Facilitator)", () => {
       expect(result.payer).toBe(erc6492Payer);
     });
 
-    it("should reject deployed smart wallet when both verifyTypedData and simulation fail", async () => {
-      mockFacilitatorSigner.verifyTypedData = vi.fn().mockResolvedValue(false);
+    it("should reject deployed wallet when isValidSignature reverts (REGRESSION: was ErrEip3009SimulationFailed)", async () => {
       mockFacilitatorSigner.getCode = vi.fn().mockResolvedValue("0x6080604052");
+      // Every readContract call throws — including isValidSignature.
       mockFacilitatorSigner.readContract = vi
         .fn()
         .mockRejectedValue(new Error("execution reverted"));
 
       const result = await facilitator.verify(makeERC6492Payload(erc6492Sig), erc6492Requirements);
 
+      // The strict primitive treats a reverted isValidSignature call as "rejected"
+      // (no ECDSA fallback, no simulation second-chance). Pre-verify outcome now
+      // matches what on-chain SignatureChecker.isValidSignatureNow would return.
       expect(result.isValid).toBe(false);
-      expect(result.invalidReason).toBe(Errors.ErrEip3009SimulationFailed);
+      expect(result.invalidReason).toBe(Errors.ErrInvalidSignature);
     });
   });
 
@@ -1073,7 +1132,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       network: "eip155:84532",
       amount: "1000",
       asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-      payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
       maxTimeoutSeconds: 60,
       extra: { assetTransferMethod: "permit2", name: "USDC", version: "2" },
     };
@@ -1127,7 +1186,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should call settleWithPermit when EIP-2612 extension is present", async () => {
       // settle's re-verify has simulate=false, so readContract is not called for simulation
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makePermit2Payload(makeEip2612Extension());
       const result = await facilitator.settle(payload, permit2Requirements);
@@ -1142,7 +1201,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should call settle (not settleWithPermit) when no EIP-2612 extension", async () => {
       // settle's re-verify has simulate=false
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makePermit2Payload();
       const result = await facilitator.settle(payload, permit2Requirements);
@@ -1156,7 +1215,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should map Permit2612AmountMismatch contract revert to permit2_2612_amount_mismatch", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
       mockFacilitatorSigner.writeContract = vi
         .fn()
         .mockRejectedValue(new Error("execution reverted: Permit2612AmountMismatch()"));
@@ -1169,7 +1228,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should map InvalidAmount contract revert to permit2_invalid_amount", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
       mockFacilitatorSigner.writeContract = vi
         .fn()
         .mockRejectedValue(new Error("execution reverted: InvalidAmount()"));
@@ -1182,7 +1241,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should map InvalidNonce contract revert to permit2_invalid_nonce", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
       mockFacilitatorSigner.writeContract = vi
         .fn()
         .mockRejectedValue(new Error("execution reverted: InvalidNonce()"));
@@ -1196,7 +1255,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should pass correct EIP-2612 permit struct to settleWithPermit", async () => {
       // settle's re-verify has simulate=false
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const extensions = makeEip2612Extension();
       const payload = makePermit2Payload(extensions);
@@ -1231,7 +1290,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       network: "eip155:84532",
       amount: "1000",
       asset: TOKEN_ADDRESS,
-      payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
       maxTimeoutSeconds: 60,
       extra: { assetTransferMethod: "permit2" },
     };
@@ -1294,9 +1353,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should reject when simulation fails and no ERC-20 extension (no context)", async () => {
       // Simulation of settle() fails, diagnostic multicall shows low allowance
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === x402ExactPermit2ProxyAddress) {
             return Promise.reject(new Error("execution reverted"));
           }
@@ -1327,7 +1384,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject when ERC-20 extension has invalid format (bad address)", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makeErc20Permit2Payload({
         erc20ApprovalGasSponsoring: {
@@ -1350,7 +1407,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject when ERC-20 extension `from` doesn't match payer", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makeErc20Permit2Payload({
         erc20ApprovalGasSponsoring: {
@@ -1373,7 +1430,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject when ERC-20 extension `asset` doesn't match token", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makeErc20Permit2Payload({
         erc20ApprovalGasSponsoring: {
@@ -1396,7 +1453,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject when ERC-20 extension spender is not PERMIT2_ADDRESS", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const payload = makeErc20Permit2Payload({
         erc20ApprovalGasSponsoring: {
@@ -1420,9 +1477,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     it("should accept when valid ERC-20 extension present and prerequisites pass", async () => {
       // checkPermit2Prerequisites multicall: proxy deployed + sufficient token balance
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               {
@@ -1454,7 +1509,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should reject when calldata targets wrong address (not PERMIT2_ADDRESS)", async () => {
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const wrongSpenderCalldata =
         "0x095ea7b3" +
@@ -1483,7 +1538,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       } as any);
       vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
 
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const mockSimulateTransactions = vi.fn().mockResolvedValue(true);
 
@@ -1522,9 +1577,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       } as any);
       vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
 
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             // diagnostic multicall: proxy deployed, balance insufficient
             return Promise.resolve([
@@ -1579,9 +1632,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
 
       // prerequisites pass: proxy deployed + sufficient token balance
-      mockFacilitatorSigner.readContract = vi
-        .fn()
-        .mockImplementation(({ address }: { address: string }) => {
+      mockFacilitatorSigner.readContract = rcWithSig(({ address }: { address: string }) => {
           if (address === MULTICALL3_ADDRESS) {
             return Promise.resolve([
               {
@@ -1634,7 +1685,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       network: "eip155:84532",
       amount: "1000",
       asset: TOKEN_ADDRESS,
-      payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
       maxTimeoutSeconds: 60,
       extra: { assetTransferMethod: "permit2" },
     };
@@ -1692,7 +1743,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
 
       // settle's re-verify has simulate=false, so no simulation calls
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const SETTLE_TX_HASH = "0xsettle_tx_hash_mock" as `0x${string}`;
       const mockSendTransactions = vi.fn().mockResolvedValue([SETTLE_TX_HASH]);
@@ -1745,7 +1796,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       vi.mocked(recoverTransactionAddress).mockResolvedValue(PAYER);
 
       // settle's re-verify has simulate=false
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(undefined);
+      mockFacilitatorSigner.readContract = rcWithSig(undefined);
 
       const selectedSignerSendTransactions = vi
         .fn()
@@ -1804,7 +1855,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
       network: "eip155:84532",
       amount: "1000000",
       asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-      payTo: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0",
+      payTo: "0x742D35CC6634c0532925A3b844BC9E7595F0BEb0",
       maxTimeoutSeconds: 300,
       extra: { name: "USDC", version: "2" },
     };
@@ -1841,7 +1892,7 @@ describe("ExactEvmScheme (Facilitator)", () => {
 
     beforeEach(() => {
       mockFacilitatorSigner.verifyTypedData = vi.fn().mockResolvedValue(true);
-      mockFacilitatorSigner.readContract = vi.fn().mockResolvedValue(0n);
+      mockFacilitatorSigner.readContract = rcWithSig(0n);
       mockFacilitatorSigner.writeContract = vi.fn().mockResolvedValue("0xsettletxhash");
       mockFacilitatorSigner.sendTransaction = vi.fn().mockResolvedValue("0xdeploytxhash");
       mockFacilitatorSigner.waitForTransactionReceipt = vi
@@ -1868,9 +1919,20 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should deploy and settle when factory is in allowlist", async () => {
+      // After sendTransaction (factory deploy), getCode must return deployed bytecode
+      // so the polling loop exits. Track deploy state via sendTransaction call count.
+      let deployed = false;
+      mockFacilitatorSigner.sendTransaction = vi.fn().mockImplementation(async () => {
+        deployed = true;
+        return "0xdeploytxhash";
+      });
       mockFacilitatorSigner.getCode = vi
         .fn()
-        .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
+        .mockImplementation(({ address }: { address: string }) => {
+          const assetAddr = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+          if (address.toLowerCase() === assetAddr.toLowerCase()) return Promise.resolve("0x6080604052");
+          return Promise.resolve(deployed ? "0x6080604052" : "0x");
+        });
       const scheme = new ExactEvmScheme(mockFacilitatorSigner, {
         eip6492AllowedFactories: [SETTLE_FACTORY],
       });
@@ -1886,9 +1948,18 @@ describe("ExactEvmScheme (Facilitator)", () => {
     });
 
     it("should match factory address case-insensitively", async () => {
+      let deployed = false;
+      mockFacilitatorSigner.sendTransaction = vi.fn().mockImplementation(async () => {
+        deployed = true;
+        return "0xdeploytxhash";
+      });
       mockFacilitatorSigner.getCode = vi
         .fn()
-        .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
+        .mockImplementation(({ address }: { address: string }) => {
+          const assetAddr = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+          if (address.toLowerCase() === assetAddr.toLowerCase()) return Promise.resolve("0x6080604052");
+          return Promise.resolve(deployed ? "0x6080604052" : "0x");
+        });
       const scheme = new ExactEvmScheme(mockFacilitatorSigner, {
         eip6492AllowedFactories: [SETTLE_FACTORY.toUpperCase() as `0x${string}`],
       });
@@ -1936,14 +2007,21 @@ describe("ExactEvmScheme (Facilitator)", () => {
       expect(mockFacilitatorSigner.writeContract).toHaveBeenCalled();
     });
 
-    it("should not call factory deployment for EOA payer", async () => {
+    it("should not call factory deployment for EOA payer (no 6492 wrapper)", async () => {
+      // Payer is an EOA (mockGetCodeEOAPayer returns "0x" for non-asset addresses).
+      // Sign with a real 65-byte ECDSA signature so the strict primitive's ECDSA
+      // path can succeed; we want to verify settle does NOT call sendTransaction
+      // for factory deployment regardless of the signature outcome — there's no
+      // 6492 wrapper, so deployment can't be triggered.
       mockFacilitatorSigner.getCode = vi
         .fn()
         .mockImplementation(mockGetCodeEOAPayer("0x036CbD53842c5426634e7929541eC2318f3dCF7e"));
-      const eoaSig = ("0x" + "aa".repeat(66)) as `0x${string}`;
       const scheme = new ExactEvmScheme(mockFacilitatorSigner, {
         eip6492AllowedFactories: [],
       });
+      // 65-byte sig fixture — strict primitive will attempt ecrecover. The
+      // recovered address won't match SETTLE_PAYER, so sig will be invalid.
+      const eoaSig = ("0x" + "aa".repeat(65)) as `0x${string}`;
       const eoaPayload: PaymentPayload = {
         ...makeSettlePayload(eoaSig),
         payload: {
@@ -1959,9 +2037,9 @@ describe("ExactEvmScheme (Facilitator)", () => {
         },
       };
 
-      const result = await scheme.settle(eoaPayload, settleRequirements);
+      await scheme.settle(eoaPayload, settleRequirements);
 
-      expect(result.success).toBe(true);
+      // Regardless of the signature outcome, we never deploy a factory for an EOA.
       expect(mockFacilitatorSigner.sendTransaction).not.toHaveBeenCalled();
     });
   });

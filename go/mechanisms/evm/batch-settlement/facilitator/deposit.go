@@ -542,8 +542,11 @@ func verifyErc3009DepositAuthorization(
 			fmt.Sprintf("invalid erc3009 signature: %s", err))
 	}
 
-	valid, err := signer.VerifyTypedData(
+	// Uses the strict code-routed primitive so pre-verify mirrors on-chain
+	// SignatureChecker (USDC v2.2 uses code-routing for ERC-3009 authorization).
+	valid, err := evm.VerifyTypedDataStrict(
 		ctx,
+		signer,
 		config.Payer,
 		evm.TypedDataDomain{
 			Name:              tokenName,
@@ -647,8 +650,12 @@ func verifyPermit2DepositAuthorization(
 			"channelId": channelIdBytes,
 		},
 	}
-	valid, err := signer.VerifyTypedData(
-		ctx, config.Payer,
+	// Uses the strict code-routed primitive so pre-verify mirrors Permit2's
+	// on-chain SignatureVerification (routes by code.length).
+	valid, err := evm.VerifyTypedDataStrict(
+		ctx,
+		signer,
+		config.Payer,
 		domain,
 		batchsettlement.BatchPermit2WitnessTypes,
 		"PermitWitnessTransferFrom",

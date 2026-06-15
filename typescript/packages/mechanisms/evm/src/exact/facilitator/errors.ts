@@ -72,3 +72,11 @@ export const ErrEip2612DeadlineExpired = "eip2612_deadline_expired";
 export const ErrUnsupportedPayloadType = "unsupported_payload_type";
 export const ErrInvalidTransactionState = "invalid_transaction_state";
 export const ErrFactoryNotAllowed = "eip6492_factory_not_allowed";
+export const ErrSmartWalletDeploymentFailed = "smart_wallet_deployment_failed";
+export const ErrDeployedInnerWalletSignatureUnsupported =
+  "eip6492_deployed_inner_wallet_signature_unsupported";
+export const DeployedInnerWalletSignatureUnsupportedMessage =
+  "Smart wallet was deployed from its ERC-6492 counterfactual address, but the deployed " +
+  "wallet rejected the inner signature — the validator/plugin needed to verify it was not " +
+  "active at deployment. The wallet is now deployed; retry the payment and the wallet should " +
+  "produce a standard ERC-1271 signature that settles.";

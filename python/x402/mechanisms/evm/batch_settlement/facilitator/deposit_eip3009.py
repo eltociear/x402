@@ -12,6 +12,7 @@ except ImportError as e:
 from .....schemas import PaymentRequirements, VerifyResponse
 from ...erc6492 import parse_erc6492_signature
 from ...signer import FacilitatorEvmSigner
+from ...verify import verify_typed_data_strict
 from ..constants import (
     ERC3009_DEPOSIT_COLLECTOR_ADDRESS,
     RECEIVE_AUTHORIZATION_TYPES,
@@ -130,7 +131,9 @@ def _verify_receive_auth(
             "validBefore": valid_before,
             "nonce": coerce_bytes32(nonce),
         }
-        return signer.verify_typed_data(
+        # Uses the strict primitive that mirrors on-chain SignatureChecker (code-routed, no ECDSA fallback).
+        return verify_typed_data_strict(
+            signer,
             address=to_checksum_address(payer),
             domain=domain,
             types=RECEIVE_AUTHORIZATION_TYPES,

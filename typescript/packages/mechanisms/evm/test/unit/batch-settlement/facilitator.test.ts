@@ -98,7 +98,12 @@ function makeRequirements(overrides: Partial<PaymentRequirements> = {}): Payment
 function buildSigner(overrides: Partial<FacilitatorEvmSigner> = {}): FacilitatorEvmSigner {
   return {
     getAddresses: () => [FACILITATOR_ADDRESS],
+    // The strict signature primitive added in the 7702 fix calls readContract
+    // with functionName="isValidSignature". Return ERC-1271 magic by default so
+    // existing tests' mock placeholder signatures pass through. Tests that need
+    // an invalid signature override readContract to return "0xffffffff".
     readContract: vi.fn().mockImplementation(args => {
+      if (args.functionName === "isValidSignature") return Promise.resolve("0x1626ba7e");
       if (args.functionName === "receivers") return Promise.resolve([2500n, 0n]);
       return Promise.resolve(undefined);
     }),
@@ -106,7 +111,10 @@ function buildSigner(overrides: Partial<FacilitatorEvmSigner> = {}): Facilitator
     writeContract: vi.fn().mockResolvedValue("0xtxhash" as `0x${string}`),
     sendTransaction: vi.fn(),
     waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "success" }),
-    getCode: vi.fn(),
+    // Default: contract bytecode so the strict primitive takes the EIP-1271 path
+    // and uses the readContract mock above. Tests that need an EOA path can
+    // override getCode to return "0x".
+    getCode: vi.fn().mockResolvedValue("0x6080604052"),
     ...overrides,
   };
 }
@@ -296,8 +304,14 @@ describe("BatchSettlementEvmScheme (Facilitator) — verifyVoucher", () => {
     expect(result.extra?.totalClaimed).toBe("0");
   });
 
-  it("returns InvalidVoucherSignature when verifyTypedData fails", async () => {
-    const signer = buildSigner({ verifyTypedData: vi.fn().mockResolvedValue(false) });
+  it("returns InvalidVoucherSignature when isValidSignature returns failure", async () => {
+    const signer = buildSigner({
+      readContract: vi.fn().mockImplementation(async (args: { functionName: string }) => {
+        if (args.functionName === "isValidSignature") return "0xffffffff";
+        if (args.functionName === "receivers") return [2500n, 0n];
+        return undefined;
+      }),
+    });
     const scheme = new BatchSettlementEvmScheme(signer, authorizer);
     const config = buildChannelConfig({
       payerAuthorizer: "0x0000000000000000000000000000000000000000",
@@ -561,8 +575,14 @@ describe("BatchSettlementEvmScheme (Facilitator) — verifyDeposit", () => {
     expect(result.invalidReason).toBe(Errors.ErrInsufficientBalance);
   });
 
-  it("returns InvalidReceiveAuthorizationSignature when verifyTypedData fails", async () => {
-    const signer = buildSigner({ verifyTypedData: vi.fn().mockResolvedValue(false) });
+  it("returns InvalidReceiveAuthorizationSignature when isValidSignature returns failure", async () => {
+    const signer = buildSigner({
+      readContract: vi.fn().mockImplementation(async (args: { functionName: string }) => {
+        if (args.functionName === "isValidSignature") return "0xffffffff";
+        if (args.functionName === "receivers") return [2500n, 0n];
+        return undefined;
+      }),
+    });
     const scheme = new BatchSettlementEvmScheme(signer, authorizer);
     const { payload } = buildDeposit();
 
@@ -669,6 +689,7 @@ describe("BatchSettlementEvmScheme (Facilitator) — verifyDeposit", () => {
 
   it("accepts a Permit2 deposit and simulates with the Permit2 collector", async () => {
     const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+      if (functionName === "isValidSignature") return "0x1626ba7e";
       if (functionName === "allowance") return 1_000_000n;
       return undefined;
     });
@@ -749,6 +770,7 @@ describe("BatchSettlementEvmScheme (Facilitator) — verifyDeposit", () => {
 
   it("rejects Permit2 deposits without Permit2 allowance or sponsoring data", async () => {
     const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+      if (functionName === "isValidSignature") return "0x1626ba7e";
       if (functionName === "allowance") return 1n;
       return undefined;
     });
