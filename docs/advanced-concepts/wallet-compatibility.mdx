@@ -138,7 +138,11 @@ Permit2 has no built-in counterfactual mechanism. Settle the wallet to the chain
 
 **⁴ — ERC-6492 counterfactual + `batch-settlement` ERC-3009 deposit**
 
-Supported if the batch-settlement facilitator is configured to allow the factory. The ERC3009DepositCollector calls `receiveWithAuthorization` on the token, which routes to `isValidSignature` for addresses with code. x402 deploys the factory before the deposit call, establishing code at the address. The token then performs EIP-1271 against the newly deployed contract.
+Supported with configuration. When the deposit's ERC-3009 authorization is ERC-6492-wrapped and the payer address has no code yet, the batch-settlement facilitator deploys the wallet via the wrapped factory before submitting the `deposit`. After deployment the `ERC3009DepositCollector` calls `receiveWithAuthorization`, which routes to `isValidSignature` on the now-deployed wallet.
+
+Requires the batch-settlement facilitator to be configured with an explicit allowlist of permitted factory addresses (`eip6492AllowedFactories` in Go's `BatchSettlementEvmSchemeConfig`; the `eip6492_allowed_factories` / `eip6492AllowedFactories` constructor argument in Python and TypeScript). Arbitrary factory calls are blocked by default to prevent attacker-controlled transaction injection. During verify and after the on-chain deploy, the facilitator simulates the deposit (factory-deploy + `deposit` via Multicall3 in pre-verify; a plain `deposit` `eth_call` post-deploy) so a wallet whose validator is installed lazily surfaces `..._eip6492_deployed_inner_wallet_signature_unsupported` and the payment can be retried, rather than submitting a deposit that would revert. This mirrors the `exact` EIP-3009 behavior in footnote ². Settlement of an inner-signature-rejecting wallet leaves it deployed, so a retry settles.
+
+**Voucher caveat:** a deposit payload also carries a voucher, which is verified before the deposit. Because the counterfactual wallet has no code yet, the voucher cannot be EIP-1271-verified against the payer. Set `payerAuthorizer` to an EOA you control (see footnote ⁶) so the voucher is verified via `ECDSA.recoverCalldata`; the deposit authorization is still signed by (and deploys) the smart wallet. With `payerAuthorizer = address(0)` the voucher routes to the undeployed payer and the deposit is rejected before the deploy step.
 
 ---
 
@@ -197,5 +201,5 @@ The quickest way to identify which type applies to an address:
 |---|---|
 | Does the address have code? | Determines whether on-chain verifiers call `isValidSignature` (with code) or `ecrecover` (without). |
 | What does the delegate's `isValidSignature` accept? | Determines 7702 compatibility for code-routed schemes. |
-| Which scheme is being used? | Some schemes (Permit2) never support counterfactual; others (EIP-3009 exact) do with configuration. |
+| Which scheme is being used? | Some schemes (Permit2) never support counterfactual; the code-routed EIP-3009 flows (`exact` EIP-3009 and `batch-settlement` ERC-3009 deposit) do with an allowlisted factory. |
 | Is `payerAuthorizer` set in batch-settlement? | If yes, ECDSA-only path — smart accounts and counterfactual wallets cannot be the authorizer. |

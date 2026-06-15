@@ -5,7 +5,8 @@ combination documented in docs/advanced-concepts/wallet-compatibility.mdx.
 
 Wallet types:
   A - Plain EOA (EIP-3009 + Permit2)
-  B - Deployed ERC-4337-style smart account (EIP-3009 only; no execute() for Permit2 approve)
+  B - Deployed Coinbase Smart Wallet (ERC-4337, EIP-3009 only)
+  7579 - Deployed Biconomy Nexus (ERC-7579, EIP-3009 only)
   D - ERC-7702 EOA delegated to PermissiveECDSADelegate (EIP-3009 + Permit2)
 
 (Wallet C / ERC-6492: Python client does not produce ERC-6492-wrapped sigs.
@@ -14,8 +15,11 @@ Wallet types:
 Required env vars (set in python/x402/.env):
   EVM_FACILITATOR_PRIVATE_KEY, EVM_RESOURCE_SERVER_ADDRESS
   EVM_CLIENT_EOA_PRIVATE_KEY          — Wallet A
-  EVM_CLIENT_4337_ADDRESS             — Wallet B address
+  EVM_CLIENT_4337_ADDRESS             — Wallet B address (Coinbase Smart Wallet)
   EVM_CLIENT_4337_OWNER_PRIVATE_KEY   — Wallet B owner key
+  EVM_CLIENT_7579_ADDRESS             — Wallet 7579 address (Biconomy Nexus)
+  EVM_CLIENT_7579_OWNER_PRIVATE_KEY   — Wallet 7579 owner key
+  EVM_CLIENT_7579_VALIDATOR           — Wallet 7579 K1 validator (optional)
   EVM_CLIENT_7702_PRIVATE_KEY         — Wallet D key (address is 7702-delegated)
 """
 
@@ -39,6 +43,11 @@ from x402.mechanisms.evm.exact import (
 )
 from x402.mechanisms.evm.erc7702 import is_erc7702_delegation
 from x402.mechanisms.evm.signers import EthAccountSigner, FacilitatorWeb3Signer
+from x402.tests.integrations._smart_accounts import (
+    NEXUS_K1_VALIDATOR,
+    CoinbaseSmartWalletSigner,
+    NexusSmartAccountSigner,
+)
 from x402.schemas import (
     PaymentPayload,
     PaymentRequirements,
@@ -55,6 +64,9 @@ EOA_KEY = os.environ.get("EVM_CLIENT_EOA_PRIVATE_KEY")
 # Wallet B
 ADDR_4337 = os.environ.get("EVM_CLIENT_4337_ADDRESS")
 KEY_4337_OWNER = os.environ.get("EVM_CLIENT_4337_OWNER_PRIVATE_KEY")
+ADDR_7579 = os.environ.get("EVM_CLIENT_7579_ADDRESS")
+KEY_7579_OWNER = os.environ.get("EVM_CLIENT_7579_OWNER_PRIVATE_KEY")
+VALIDATOR_7579 = os.environ.get("EVM_CLIENT_7579_VALIDATOR")
 # Wallet D
 KEY_7702 = os.environ.get("EVM_CLIENT_7702_PRIVATE_KEY")
 # Wallet C factory (skip if missing — ERC-6492 not supported in Python client)
@@ -172,32 +184,35 @@ class TestWalletMatrixA:
 
 
 class TestWalletMatrixB:
-    """Wallet B — Deployed ERC-4337-style smart account (SimpleWallet)."""
+    """Wallet B — Deployed Coinbase Smart Wallet (ERC-4337)."""
 
     def test_deployed_smart_account_exact_eip3009(self) -> None:
         if not KEY_4337_OWNER or not ADDR_4337 or not RESOURCE_SERVER:
             pytest.skip("EVM_CLIENT_4337_OWNER_PRIVATE_KEY / EVM_CLIENT_4337_ADDRESS required")
 
         server, _ = _build_server(FACILITATOR_KEY)
-
-        # The PAYER address is the smart account; signing is done with the owner key.
-        # EthAccountSigner uses the underlying eth_account's address by default.
-        # We override the address via a thin wrapper so `from` in EIP-3009 typed data
-        # is the smart account address, not the owner's EOA address.
         owner_acct = Account.from_key(KEY_4337_OWNER)
-        smart_acct_addr = Web3.to_checksum_address(ADDR_4337)
-
-        class SmartAccountSigner(EthAccountSigner):
-            @property
-            def address(self) -> str:
-                return smart_acct_addr
-
-        signer = SmartAccountSigner(owner_acct)
-        settle = _run_flow(signer, server, RESOURCE_SERVER, "wallet-B-erc4337")
-        assert settle.payer.lower() == smart_acct_addr.lower(), (
-            f"payer {settle.payer} != smart acct {smart_acct_addr}"
-        )
+        signer = CoinbaseSmartWalletSigner(owner_acct, ADDR_4337)
+        settle = _run_flow(signer, server, RESOURCE_SERVER, "wallet-B-coinbase-smart-wallet")
+        assert settle.payer.lower() == ADDR_4337.lower()
         print(f"\nWallet B ✅ tx={settle.transaction} payer={settle.payer}")
+
+
+class TestWalletMatrix7579:
+    """Wallet 7579 — Deployed Biconomy Nexus (ERC-7579)."""
+
+    def test_deployed_nexus_exact_eip3009(self) -> None:
+        if not KEY_7579_OWNER or not ADDR_7579 or not RESOURCE_SERVER:
+            pytest.skip("EVM_CLIENT_7579_OWNER_PRIVATE_KEY / EVM_CLIENT_7579_ADDRESS required")
+
+        server, _ = _build_server(FACILITATOR_KEY)
+        owner_acct = Account.from_key(KEY_7579_OWNER)
+        w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        validator = VALIDATOR_7579 or NEXUS_K1_VALIDATOR
+        signer = NexusSmartAccountSigner(owner_acct, ADDR_7579, w3, validator)
+        settle = _run_flow(signer, server, RESOURCE_SERVER, "wallet-7579-biconomy-nexus")
+        assert settle.payer.lower() == ADDR_7579.lower()
+        print(f"\nWallet 7579 ✅ tx={settle.transaction} payer={settle.payer}")
 
 
 class TestWalletMatrixD:

@@ -289,7 +289,7 @@ func TestSettleDeposit_BadAmount(t *testing.T) {
 			Amount: "not-a-number",
 		},
 	}
-	_, err := SettleDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := SettleDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var se *x402.SettleError
 	if !errors.As(err, &se) || se.ErrorReason != ErrInvalidDepositPayload {
 		t.Fatalf("got err = %v", err)
@@ -307,7 +307,7 @@ func TestSettleDeposit_MissingAuthorization(t *testing.T) {
 			Amount: "100",
 		},
 	}
-	_, err := SettleDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := SettleDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var se *x402.SettleError
 	if !errors.As(err, &se) || se.ErrorReason != ErrInvalidDepositPayload {
 		t.Fatalf("got err = %v", err)
@@ -332,7 +332,7 @@ func TestVerifyDeposit_BadAmount(t *testing.T) {
 			Signature:          "0xsig",
 		},
 	}
-	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var ve *x402.VerifyError
 	if !errors.As(err, &ve) || ve.InvalidReason != ErrInvalidDepositPayload {
 		t.Fatalf("got err = %v", err)
@@ -363,7 +363,7 @@ func TestVerifyDeposit_BadValidAfter(t *testing.T) {
 			Signature:          "0xsig",
 		},
 	}
-	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var ve *x402.VerifyError
 	if !errors.As(err, &ve) || ve.InvalidReason != ErrInvalidDepositPayload {
 		t.Fatalf("got err = %v", err)
@@ -394,7 +394,7 @@ func TestVerifyDeposit_BadValidBefore(t *testing.T) {
 			Signature:          "0xsig",
 		},
 	}
-	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var ve *x402.VerifyError
 	if !errors.As(err, &ve) || ve.InvalidReason != ErrInvalidDepositPayload {
 		t.Fatalf("got err = %v", err)
@@ -425,7 +425,7 @@ func TestVerifyDeposit_ExpiredAuthorization(t *testing.T) {
 			Signature:          "0xsig",
 		},
 	}
-	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var ve *x402.VerifyError
 	if !errors.As(err, &ve) || ve.InvalidReason != ErrValidBeforeExpired {
 		t.Fatalf("got err = %v", err)
@@ -448,7 +448,7 @@ func TestVerifyDeposit_ChannelConfigInvalid(t *testing.T) {
 			Signature:          "0xsig",
 		},
 	}
-	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil)
+	_, err := VerifyDeposit(context.Background(), scheme.signer, payload, reqsFor(testNetwork), nil, nil, nil)
 	var ve *x402.VerifyError
 	if !errors.As(err, &ve) || ve.InvalidReason != ErrChannelIdMismatch {
 		t.Fatalf("got err = %v", err)

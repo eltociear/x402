@@ -35,6 +35,19 @@ export const ErrWithdrawDelayMismatch = "invalid_batch_settlement_evm_withdraw_d
 export const ErrAuthorizerAddressMismatch =
   "invalid_batch_settlement_evm_authorizer_address_mismatch";
 export const ErrDepositSimulationFailed = "invalid_batch_settlement_evm_deposit_simulation_failed";
+
+// ERC-6492 counterfactual deployment errors (ERC-3009 deposit path). Wire values keep the
+// scheme prefix to match the rest of this module's contract.
+export const ErrFactoryNotAllowed = "invalid_batch_settlement_evm_eip6492_factory_not_allowed";
+export const ErrSmartWalletDeploymentFailed =
+  "invalid_batch_settlement_evm_smart_wallet_deployment_failed";
+export const ErrDeployedInnerWalletSignatureUnsupported =
+  "invalid_batch_settlement_evm_eip6492_deployed_inner_wallet_signature_unsupported";
+export const DeployedInnerWalletSignatureUnsupportedMessage =
+  "Smart wallet was deployed from its ERC-6492 counterfactual address, but the deployed " +
+  "wallet rejected the inner signature — the validator/plugin needed to verify it was not " +
+  "active at deployment. The wallet is now deployed; retry the payment and the wallet should " +
+  "produce a standard ERC-1271 signature that settles.";
 export const ErrClaimSimulationFailed = "invalid_batch_settlement_evm_claim_simulation_failed";
 export const ErrSettleSimulationFailed = "invalid_batch_settlement_evm_settle_simulation_failed";
 export const ErrNothingToSettle = "invalid_batch_settlement_evm_nothing_to_settle";

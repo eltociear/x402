@@ -42,9 +42,14 @@ class BatchSettlementEvmFacilitator:
         self,
         signer: FacilitatorEvmSigner,
         authorizer_signer: AuthorizerSigner,
+        eip6492_allowed_factories: list[str] | None = None,
     ) -> None:
         self._signer = signer
         self._authorizer_signer = authorizer_signer
+        # Allowlist of factory addresses the facilitator will call to deploy an undeployed
+        # (ERC-6492 counterfactual) wallet before an ERC-3009 deposit. Empty/None denies all
+        # factory deployment, so counterfactual deposits are rejected.
+        self._eip6492_allowed_factories = list(eip6492_allowed_factories or [])
 
     def get_extra(self, network: str) -> dict | None:
         return {"receiverAuthorizer": self._authorizer_signer.address}
@@ -73,7 +78,14 @@ class BatchSettlementEvmFacilitator:
             from .deposit import verify_deposit
 
             deposit = DepositPayload.from_dict(raw)
-            return verify_deposit(self._signer, payload, deposit, requirements, context)
+            return verify_deposit(
+                self._signer,
+                payload,
+                deposit,
+                requirements,
+                context,
+                self._eip6492_allowed_factories,
+            )
 
         if is_voucher_payload(raw):
             from .voucher import verify_voucher
@@ -102,7 +114,14 @@ class BatchSettlementEvmFacilitator:
             from .deposit import settle_deposit
 
             deposit = DepositPayload.from_dict(raw)
-            return settle_deposit(self._signer, payload, deposit, requirements, context)
+            return settle_deposit(
+                self._signer,
+                payload,
+                deposit,
+                requirements,
+                context,
+                self._eip6492_allowed_factories,
+            )
 
         if is_claim_payload(raw):
             from .claim import execute_claim_with_signature

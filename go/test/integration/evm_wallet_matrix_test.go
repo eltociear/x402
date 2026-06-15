@@ -5,19 +5,22 @@
 //
 //	EVM_FACILITATOR_PRIVATE_KEY, EVM_RESOURCE_SERVER_ADDRESS (shared)
 //	EVM_CLIENT_EOA_PRIVATE_KEY          — Wallet A: plain EOA
-//	EVM_CLIENT_4337_ADDRESS             — Wallet B: deployed smart account address
+//	EVM_CLIENT_4337_ADDRESS             — Wallet B: Coinbase Smart Wallet address
 //	EVM_CLIENT_4337_OWNER_PRIVATE_KEY   — Wallet B: owner key (signs on behalf of smart account)
+//	EVM_CLIENT_7579_ADDRESS             — Wallet 7579: Biconomy Nexus address
+//	EVM_CLIENT_7579_OWNER_PRIVATE_KEY   — Wallet 7579: owner key
+//	EVM_CLIENT_7579_VALIDATOR           — Wallet 7579: K1 validator address (optional)
 //	EVM_CLIENT_7702_PRIVATE_KEY         — Wallet D: key whose address is 7702-delegated
 //	EVM_CLIENT_7702_ADDRESS             — Wallet D: expected address (sanity check)
 package integration_test
 
 import (
 	"context"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	x402 "github.com/x402-foundation/x402/go/v2"
@@ -207,8 +210,7 @@ func TestWalletMatrix_A_PlainEOA(t *testing.T) {
 	runMatrixFlow(t, key, facil, rs, "wallet-A-plain-eoa")
 }
 
-// TestWalletMatrix_B_DeployedSmartAccount exercises a deployed EIP-1271 smart account.
-// The owner key signs; the account address is the smart contract.
+// TestWalletMatrix_B_DeployedSmartAccount exercises a deployed Coinbase Smart Wallet (ERC-4337).
 func TestWalletMatrix_B_DeployedSmartAccount(t *testing.T) {
 	ownerKey := os.Getenv("EVM_CLIENT_4337_OWNER_PRIVATE_KEY")
 	acctAddr := os.Getenv("EVM_CLIENT_4337_ADDRESS")
@@ -218,38 +220,56 @@ func TestWalletMatrix_B_DeployedSmartAccount(t *testing.T) {
 		t.Skip("EVM_CLIENT_4337_OWNER_PRIVATE_KEY / EVM_CLIENT_4337_ADDRESS / EVM_FACILITATOR_PRIVATE_KEY required")
 	}
 
-	// The Go client signer uses the private key's address for the `from` field.
-	// For a smart account, we need `from = smart account address` but sign with the owner key.
-	// NewClientSignerWithOverrideAddress creates a signer that signs with ownerKey
-	// but presents the smart account address.
-	cleanOwnerKey := strings.TrimPrefix(ownerKey, "0x")
-	privKey, err := crypto.HexToECDSA(cleanOwnerKey)
-	if err != nil {
-		t.Fatalf("parse owner key: %v", err)
-	}
-	_ = common.HexToAddress(acctAddr) // validate address
-
-	// Wrap the real signer so it reports the smart account address.
 	ownerSigner, err := evmsigners.NewClientSignerFromPrivateKey(ownerKey)
 	if err != nil {
 		t.Fatalf("owner signer: %v", err)
 	}
-	_ = privKey // used via ownerSigner
+	smartSigner := newCoinbaseSmartWalletSigner(ownerSigner, acctAddr, big.NewInt(84532))
+	runMatrixFlowWithSigner(t, smartSigner, facil, rs, "wallet-B-coinbase-smart-wallet")
+}
 
-	// Use a thin signer wrapper that overrides Address() to the smart account.
-	smartAcctSigner := &smartAccountClientSigner{
-		inner:   ownerSigner,
-		address: acctAddr,
+// TestWalletMatrix_7579_DeployedNexus exercises a deployed Biconomy Nexus (ERC-7579) account.
+func TestWalletMatrix_7579_DeployedNexus(t *testing.T) {
+	ownerKey := os.Getenv("EVM_CLIENT_7579_OWNER_PRIVATE_KEY")
+	acctAddr := os.Getenv("EVM_CLIENT_7579_ADDRESS")
+	validator := os.Getenv("EVM_CLIENT_7579_VALIDATOR")
+	facil := os.Getenv("EVM_FACILITATOR_PRIVATE_KEY")
+	rs := os.Getenv("EVM_RESOURCE_SERVER_ADDRESS")
+	if ownerKey == "" || acctAddr == "" || facil == "" || rs == "" {
+		t.Skip("EVM_CLIENT_7579_OWNER_PRIVATE_KEY / EVM_CLIENT_7579_ADDRESS / EVM_FACILITATOR_PRIVATE_KEY required")
+	}
+	if validator == "" {
+		validator = nexusK1Validator
 	}
 
 	ctx := context.Background()
+	ownerSigner, err := evmsigners.NewClientSignerFromPrivateKey(ownerKey)
+	if err != nil {
+		t.Fatalf("owner signer: %v", err)
+	}
 	facilitatorSigner, err := newRealFacilitatorEvmSigner(facil, matrixRPC)
 	if err != nil {
 		t.Fatalf("facilitator signer: %v", err)
 	}
+	verifierDomain, err := fetchNexusVerifierDomain(ctx, facilitatorSigner, acctAddr)
+	if err != nil {
+		t.Fatalf("fetch nexus eip712Domain: %v", err)
+	}
+	nexusSigner := newNexusSmartAccountSigner(ownerSigner, acctAddr, validator, verifierDomain)
+	runMatrixFlowWithSigner(t, nexusSigner, facil, rs, "wallet-7579-biconomy-nexus")
+}
+
+func runMatrixFlowWithSigner(t *testing.T, clientSigner evm.ClientEvmSigner, facilitatorKey, resourceServer, label string) {
+	t.Helper()
+	ctx := context.Background()
+
+	facilitatorSigner, err := newRealFacilitatorEvmSigner(facilitatorKey, matrixRPC)
+	if err != nil {
+		t.Fatalf("%s: facilitator signer: %v", label, err)
+	}
 
 	client := x402.Newx402Client()
-	client.Register(matrixNetwork, exactevmclient.NewExactEvmScheme(smartAcctSigner, nil))
+	client.Register(matrixNetwork, exactevmclient.NewExactEvmScheme(clientSigner, nil))
 
 	facilitator := x402.Newx402Facilitator()
 	facilitator.Register([]x402.Network{matrixNetwork},
@@ -259,41 +279,43 @@ func TestWalletMatrix_B_DeployedSmartAccount(t *testing.T) {
 	server := x402.Newx402ResourceServer(x402.WithFacilitatorClient(facilClient))
 	server.Register(matrixNetwork, exactevmserver.NewExactEvmScheme())
 	if err := server.Initialize(ctx); err != nil {
-		t.Fatalf("server init: %v", err)
+		t.Fatalf("%s: server init: %v", label, err)
 	}
 
-	resource := &types.ResourceInfo{URL: "https://test.x402.org", Description: "wallet-B-erc4337"}
-	accepts := buildMatrixAccepts(rs)
+	resource := &types.ResourceInfo{URL: "https://test.x402.org", Description: label}
+	accepts := buildMatrixAccepts(resourceServer)
 	resp := server.CreatePaymentRequiredResponse(accepts, resource, "", nil)
 
 	selected, err := client.SelectPaymentRequirements(accepts)
 	if err != nil {
-		t.Fatalf("select: %v", err)
+		t.Fatalf("%s: select: %v", label, err)
 	}
 	payload, err := client.CreatePaymentPayload(ctx, selected, resource, resp.Extensions)
 	if err != nil {
-		t.Fatalf("create payload: %v", err)
+		t.Fatalf("%s: create payload: %v", label, err)
 	}
 
 	accepted := server.FindMatchingRequirements(accepts, payload)
 	if accepted == nil {
-		t.Fatalf("no matching requirements")
+		t.Fatalf("%s: no matching requirements", label)
 	}
+
 	verifyResp, err := server.VerifyPayment(ctx, payload, *accepted)
 	if err != nil {
-		t.Fatalf("verify: %v", err)
+		t.Fatalf("%s: verify error: %v", label, err)
 	}
 	if !verifyResp.IsValid {
-		t.Fatalf("verify failed: %s", verifyResp.InvalidReason)
+		t.Fatalf("%s: verify failed: %s", label, verifyResp.InvalidReason)
 	}
+
 	settleResp, err := server.SettlePayment(ctx, payload, *accepted, nil)
 	if err != nil {
-		t.Fatalf("settle: %v", err)
+		t.Fatalf("%s: settle error: %v", label, err)
 	}
 	if !settleResp.Success {
-		t.Fatalf("settle failed: %s", settleResp.ErrorReason)
+		t.Fatalf("%s: settle failed: %s", label, settleResp.ErrorReason)
 	}
-	t.Logf("Wallet B ✅ tx=%s payer=%s", settleResp.Transaction, settleResp.Payer)
+	t.Logf("%s: ✅ settled tx=%s payer=%s", label, settleResp.Transaction, settleResp.Payer)
 }
 
 // TestWalletMatrix_D_ERC7702Permissive exercises a 7702-delegated EOA whose

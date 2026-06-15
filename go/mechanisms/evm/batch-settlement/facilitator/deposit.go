@@ -52,6 +52,7 @@ func VerifyDeposit(
 	requirements types.PaymentRequirements,
 	extensions map[string]interface{},
 	fctx *x402.FacilitatorContext,
+	allowedFactories []string,
 ) (*x402.VerifyResponse, error) {
 	config := payload.ChannelConfig
 	channelId := payload.Voucher.ChannelId
@@ -81,6 +82,11 @@ func VerifyDeposit(
 	// EIP-2612 / ERC-20 approval execution; resolved once here and reused by
 	// both the simulation below and the eventual SettleDeposit call.
 	var permit2Branch *permit2DepositBranch
+	// erc3009Counterfactual is non-nil when the ERC-3009 deposit comes from an
+	// undeployed ERC-6492 wallet with an allowlisted factory. In that case the
+	// signature cannot be validated by ecrecover/EIP-1271 yet (no code), so it is
+	// validated by the deploy+deposit Multicall3 simulation below.
+	var erc3009Counterfactual *evm.ERC6492SignatureData
 	switch transferMethod {
 	case batchsettlement.AssetTransferMethodEip3009:
 		auth := payload.Deposit.Authorization.Erc3009Authorization
@@ -88,13 +94,15 @@ func VerifyDeposit(
 			return nil, x402.NewVerifyError(ErrErc3009AuthorizationRequired, config.Payer,
 				"erc3009 authorization required for assetTransferMethod=eip3009")
 		}
-		if reason, err := verifyErc3009DepositAuthorization(
-			ctx, signer, config, channelId, depositAmount, auth, chainId, requirements.Extra,
-		); err != nil {
+		counterfactual, reason, err := verifyErc3009DepositAuthorization(
+			ctx, signer, config, channelId, depositAmount, auth, chainId, requirements.Extra, allowedFactories,
+		)
+		if err != nil {
 			return nil, err
 		} else if reason != "" {
 			return nil, x402.NewVerifyError(reason, config.Payer, "ERC-3009 authorization invalid")
 		}
+		erc3009Counterfactual = counterfactual
 	case batchsettlement.AssetTransferMethodPermit2:
 		auth := payload.Deposit.Authorization.Permit2Authorization
 		if auth == nil {
@@ -194,11 +202,32 @@ func VerifyDeposit(
 		return nil, x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer,
 			fmt.Sprintf("failed to build collector data for simulation: %s", err))
 	}
+	// Counterfactual ERC-6492 deposit: the payer wallet is not yet deployed, so a
+	// plain deposit() eth_call would revert (no code → isValidSignature reverts).
+	// Simulate factory-deploy + deposit atomically in one Multicall3 eth_call so the
+	// inner signature is validated against the just-deployed wallet — mirroring how
+	// settle will deploy then deposit.
+	if erc3009Counterfactual != nil {
+		ok, simErr := simulateCounterfactualErc3009Deposit(
+			ctx, signer, erc3009Counterfactual, configTuple, depositAmount, collectorAddr, collectorData,
+		)
+		if simErr != nil || !ok {
+			return &x402.VerifyResponse{ //nolint:nilerr // simulation failure → error encoded in response
+				IsValid:       false,
+				InvalidReason: ErrDepositSimulationFailed,
+				Payer:         config.Payer,
+			}, nil
+		}
+	}
+
 	// ERC-20 approval branch: the user has not yet approved Permit2, so the
 	// standalone deposit() simulation would always revert with insufficient
 	// allowance. The execution path is multi-tx (approve+deposit handled by the
 	// extension signer in `SettleDeposit`); skip the eth_call here.
-	skipSimulation := permit2Branch != nil && permit2Branch.kind == permit2BranchErc20Approval
+	// Counterfactual deposits are simulated above via Multicall3, so skip the plain
+	// eth_call too (the wallet has no code yet and a bare deposit() would revert).
+	skipSimulation := erc3009Counterfactual != nil ||
+		(permit2Branch != nil && permit2Branch.kind == permit2BranchErc20Approval)
 	if !skipSimulation {
 		_, simErr := signer.ReadContract(
 			ctx,
@@ -275,6 +304,7 @@ func SettleDeposit(
 	requirements types.PaymentRequirements,
 	extensions map[string]interface{},
 	fctx *x402.FacilitatorContext,
+	allowedFactories []string,
 ) (*x402.SettleResponse, error) {
 	config := payload.ChannelConfig
 	network := x402.Network(requirements.Network)
@@ -322,6 +352,20 @@ func SettleDeposit(
 
 	// Build channel config tuple for contract call
 	configTuple := ToContractChannelConfig(config)
+
+	// ERC-6492 counterfactual deposit: if the ERC-3009 authorization is wrapped with
+	// factory deployment info and the payer has no code yet, deploy the wallet (gated
+	// by the factory allowlist) before the deposit. After deploying, simulate the
+	// deposit with the inner signature to catch wallets whose validator is installed
+	// lazily — submitting a doomed deposit would waste gas and misreport the failure.
+	if transferMethod == batchsettlement.AssetTransferMethodEip3009 {
+		if resp, err := deployErc3009CounterfactualIfNeeded(
+			ctx, signer, payload, requirements, allowedFactories,
+			configTuple, depositAmount, collectorAddr, collectorData,
+		); resp != nil || err != nil {
+			return resp, err
+		}
+	}
 
 	// Branch on extension settlement strategy:
 	//   erc20Approval → broadcast pre-signed approve() then deposit() via the
@@ -494,6 +538,11 @@ func buildDepositCollectorCall(
 // Returns ("invalidReason", nil) when the authorization is well-formed but
 // invalid, ("", err) when an RPC/parse error blocked verification entirely,
 // or ("", nil) when the authorization is valid.
+// verifyErc3009DepositAuthorization returns a non-nil *evm.ERC6492SignatureData when the
+// deposit is from an undeployed ERC-6492 counterfactual wallet whose factory is allowlisted.
+// In that case the caller must validate the inner signature via the deploy+deposit
+// simulation (the wallet has no code yet, so a direct signature check cannot succeed).
+// For deployed wallets and plain EOAs it returns (nil, reason, err) as before.
 func verifyErc3009DepositAuthorization(
 	ctx context.Context,
 	signer evm.FacilitatorEvmSigner,
@@ -503,17 +552,18 @@ func verifyErc3009DepositAuthorization(
 	auth *batchsettlement.BatchSettlementErc3009Authorization,
 	chainId *big.Int,
 	extra map[string]interface{},
-) (string, error) {
+	allowedFactories []string,
+) (*evm.ERC6492SignatureData, string, error) {
 	validAfter, ok := new(big.Int).SetString(auth.ValidAfter, 10)
 	if !ok {
-		return "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer, "invalid validAfter")
+		return nil, "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer, "invalid validAfter")
 	}
 	validBefore, ok := new(big.Int).SetString(auth.ValidBefore, 10)
 	if !ok {
-		return "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer, "invalid validBefore")
+		return nil, "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer, "invalid validBefore")
 	}
 	if reason := Erc3009AuthorizationTimeInvalidReason(validAfter, validBefore); reason != "" {
-		return reason, nil
+		return nil, reason, nil
 	}
 
 	// Token EIP-712 domain — required to recompute the
@@ -523,27 +573,57 @@ func verifyErc3009DepositAuthorization(
 	tokenName, _ := extra["name"].(string)
 	tokenVersion, _ := extra["version"].(string)
 	if tokenName == "" || tokenVersion == "" {
-		return ErrMissingEip712Domain, nil
+		return nil, ErrMissingEip712Domain, nil
 	}
 
 	erc3009Nonce, err := batchsettlement.BuildErc3009DepositNonce(channelId, auth.Salt)
 	if err != nil {
-		return "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer,
+		return nil, "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer,
 			fmt.Sprintf("failed to derive ERC-3009 nonce: %s", err))
 	}
 	saltBytes, err := evm.HexToBytes(erc3009Nonce)
 	if err != nil {
-		return "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer,
+		return nil, "", x402.NewVerifyError(ErrInvalidDepositPayload, config.Payer,
 			fmt.Sprintf("invalid erc3009 nonce: %s", err))
 	}
 	sigBytes, err := evm.HexToBytes(auth.Signature)
 	if err != nil {
-		return "", x402.NewVerifyError(ErrErc3009SignatureInvalid, config.Payer,
+		return nil, "", x402.NewVerifyError(ErrErc3009SignatureInvalid, config.Payer,
 			fmt.Sprintf("invalid erc3009 signature: %s", err))
+	}
+
+	// Parse the ERC-6492 wrapper (a no-op for unwrapped signatures, which return the
+	// signature unchanged as InnerSignature).
+	sigData, err := evm.ParseERC6492Signature(sigBytes)
+	if err != nil {
+		return nil, "", x402.NewVerifyError(ErrErc3009SignatureInvalid, config.Payer,
+			fmt.Sprintf("failed to parse signature: %s", err))
+	}
+
+	// Counterfactual detection: only fetch code when there is deployment info, so the
+	// common (already-deployed / plain EOA) path keeps a single RPC round-trip.
+	if evm.HasEIP6492Deployment(sigData) {
+		code, codeErr := signer.GetCode(ctx, config.Payer)
+		if codeErr != nil {
+			return nil, "", x402.NewVerifyError(ErrChannelStateReadFailed, config.Payer,
+				fmt.Sprintf("failed to read payer code: %s", codeErr))
+		}
+		if len(code) == 0 {
+			// Undeployed ERC-6492 wallet. Gate the factory before deferring signature
+			// validation to the deploy+deposit simulation.
+			if !evm.IsFactoryAllowed(sigData.Factory, allowedFactories) {
+				return nil, ErrFactoryNotAllowed, nil
+			}
+			return sigData, "", nil
+		}
+		// Wallet already deployed despite the wrapper — fall through and validate the
+		// inner signature via EIP-1271 like any other deployed wallet.
 	}
 
 	// Uses the strict code-routed primitive so pre-verify mirrors on-chain
 	// SignatureChecker (USDC v2.2 uses code-routing for ERC-3009 authorization).
+	// The inner signature is used so a deployed wallet that happened to send a wrapped
+	// signature is still verified against its EIP-1271 validator.
 	valid, err := evm.VerifyTypedDataStrict(
 		ctx,
 		signer,
@@ -564,16 +644,145 @@ func verifyErc3009DepositAuthorization(
 			"validBefore": validBefore,
 			"nonce":       saltBytes,
 		},
-		sigBytes,
+		sigData.InnerSignature,
 	)
 	if err != nil {
-		return "", x402.NewVerifyError(ErrErc3009SignatureInvalid, config.Payer,
+		return nil, "", x402.NewVerifyError(ErrErc3009SignatureInvalid, config.Payer,
 			fmt.Sprintf("ERC-3009 signature verification failed: %s", err))
 	}
 	if !valid {
-		return ErrErc3009SignatureInvalid, nil
+		return nil, ErrErc3009SignatureInvalid, nil
 	}
-	return "", nil
+	return nil, "", nil
+}
+
+// simulateCounterfactualErc3009Deposit simulates the factory deploy + deposit atomically
+// via a single Multicall3 eth_call. The deposit succeeds only if, after the wallet is
+// deployed in the first sub-call, its isValidSignature accepts the inner ERC-3009 signature
+// that the (already-stripped) collectorData carries. Returns the success of the deposit call.
+func simulateCounterfactualErc3009Deposit(
+	ctx context.Context,
+	signer evm.FacilitatorEvmSigner,
+	sigData *evm.ERC6492SignatureData,
+	configTuple interface{},
+	depositAmount *big.Int,
+	collectorAddr common.Address,
+	collectorData []byte,
+) (bool, error) {
+	results, err := evm.Multicall(ctx, signer, []evm.MulticallCall{
+		{
+			Address:  common.BytesToAddress(sigData.Factory[:]).Hex(),
+			CallData: sigData.FactoryCalldata,
+		},
+		{
+			Address:      batchsettlement.BatchSettlementAddress,
+			ABI:          batchsettlement.BatchSettlementDepositABI,
+			FunctionName: "deposit",
+			Args:         []interface{}{configTuple, depositAmount, collectorAddr, collectorData},
+		},
+	})
+	if err != nil {
+		return false, err
+	}
+	if len(results) < 2 {
+		return false, nil
+	}
+	return results[1].Success(), nil
+}
+
+// deployErc3009CounterfactualIfNeeded deploys an undeployed ERC-6492 wallet before an
+// ERC-3009 deposit when the authorization is wrapped with allowlisted factory deployment
+// info. Returns (nil, nil) when no deployment is needed (caller proceeds to deposit), or a
+// terminal (*SettleResponse-less) settle error when the factory is disallowed, the deploy
+// reverts, or the deployed wallet rejects the inner signature.
+func deployErc3009CounterfactualIfNeeded(
+	ctx context.Context,
+	signer evm.FacilitatorEvmSigner,
+	payload *batchsettlement.BatchSettlementDepositPayload,
+	requirements types.PaymentRequirements,
+	allowedFactories []string,
+	configTuple interface{},
+	depositAmount *big.Int,
+	collectorAddr common.Address,
+	collectorData []byte,
+) (*x402.SettleResponse, error) {
+	config := payload.ChannelConfig
+	network := x402.Network(requirements.Network)
+
+	auth := payload.Deposit.Authorization.Erc3009Authorization
+	if auth == nil {
+		return nil, nil
+	}
+	sigBytes, err := evm.HexToBytes(auth.Signature)
+	if err != nil {
+		return nil, x402.NewSettleError(ErrErc3009SignatureInvalid, "", network, config.Payer,
+			fmt.Sprintf("invalid erc3009 signature: %s", err))
+	}
+	sigData, err := evm.ParseERC6492Signature(sigBytes)
+	if err != nil {
+		return nil, x402.NewSettleError(ErrErc3009SignatureInvalid, "", network, config.Payer,
+			fmt.Sprintf("failed to parse signature: %s", err))
+	}
+	if !evm.HasEIP6492Deployment(sigData) {
+		return nil, nil
+	}
+
+	code, err := signer.GetCode(ctx, config.Payer)
+	if err != nil {
+		return nil, x402.NewSettleError(ErrChannelStateReadFailed, "", network, config.Payer,
+			fmt.Sprintf("failed to read payer code: %s", err))
+	}
+	if len(code) != 0 {
+		// Already deployed — nothing to do; proceed with the standard deposit.
+		return nil, nil
+	}
+
+	if !evm.IsFactoryAllowed(sigData.Factory, allowedFactories) {
+		return nil, x402.NewSettleError(ErrFactoryNotAllowed, "", network, config.Payer,
+			"factory not in EIP6492AllowedFactories allowlist")
+	}
+
+	if err := evm.SendFactoryDeployTransaction(ctx, signer, sigData); err != nil {
+		return nil, x402.NewSettleError(ErrSmartWalletDeploymentFailed, "", network, config.Payer, err.Error())
+	}
+
+	// Post-deploy: some ERC-7579 / Kernel wallets install validators lazily, so the
+	// freshly deployed wallet may reject the inner sig. Simulate the deposit (the wallet
+	// now has code) before paying gas on a doomed deposit.
+	if ok, _ := simulateDeployedErc3009Deposit(
+		ctx, signer, configTuple, depositAmount, collectorAddr, collectorData,
+	); !ok {
+		return nil, x402.NewSettleError(ErrDeployedInnerWalletSignatureUnsupported, "", network, config.Payer,
+			MsgDeployedInnerWalletSignatureUnsupported)
+	}
+
+	return nil, nil
+}
+
+// simulateDeployedErc3009Deposit simulates a plain deposit() eth_call (the wallet is already
+// deployed at this point), returning whether it would succeed.
+func simulateDeployedErc3009Deposit(
+	ctx context.Context,
+	signer evm.FacilitatorEvmSigner,
+	configTuple interface{},
+	depositAmount *big.Int,
+	collectorAddr common.Address,
+	collectorData []byte,
+) (bool, error) {
+	_, err := signer.ReadContract(
+		ctx,
+		batchsettlement.BatchSettlementAddress,
+		batchsettlement.BatchSettlementDepositABI,
+		"deposit",
+		configTuple,
+		depositAmount,
+		collectorAddr,
+		collectorData,
+	)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // verifyPermit2DepositAuthorization validates the channel-bound Permit2

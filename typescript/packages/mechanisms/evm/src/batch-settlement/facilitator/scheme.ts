@@ -42,10 +42,15 @@ export class BatchSettlementEvmScheme implements SchemeNetworkFacilitator {
    * @param authorizerSigner - Dedicated key that provides EIP-712 signatures for
    *   `claimWithSignature` / `refundWithSignature`.  The facilitator will sign missing
    *   authorizer signatures using this key when the server omits them.
+   * @param eip6492AllowedFactories - Allowlist of factory addresses the facilitator will call
+   *   to deploy an undeployed (ERC-6492 counterfactual) wallet before an ERC-3009 deposit. An
+   *   empty list (the default) denies all factory deployment, so counterfactual deposits are
+   *   rejected.
    */
   constructor(
     private readonly signer: FacilitatorEvmSigner,
     private readonly authorizerSigner: AuthorizerSigner,
+    private readonly eip6492AllowedFactories: string[] = [],
   ) {}
 
   /**
@@ -100,7 +105,14 @@ export class BatchSettlementEvmScheme implements SchemeNetworkFacilitator {
     }
 
     if (isBatchSettlementDepositPayload(rawPayload)) {
-      return verifyDeposit(this.signer, payload, rawPayload, requirements, context);
+      return verifyDeposit(
+        this.signer,
+        payload,
+        rawPayload,
+        requirements,
+        context,
+        this.eip6492AllowedFactories,
+      );
     }
 
     if (isBatchSettlementVoucherPayload(rawPayload)) {
@@ -141,7 +153,15 @@ export class BatchSettlementEvmScheme implements SchemeNetworkFacilitator {
     });
 
     if (isBatchSettlementDepositPayload(rawPayload)) {
-      return settleDeposit(this.signer, payload, rawPayload, requirements, context, dataSuffix);
+      return settleDeposit(
+        this.signer,
+        payload,
+        rawPayload,
+        requirements,
+        context,
+        dataSuffix,
+        this.eip6492AllowedFactories,
+      );
     }
 
     if (isBatchSettlementClaimPayload(rawPayload)) {

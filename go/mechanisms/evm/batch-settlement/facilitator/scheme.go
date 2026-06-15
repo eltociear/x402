@@ -10,10 +10,21 @@ import (
 	"github.com/x402-foundation/x402/go/v2/types"
 )
 
+// BatchSettlementEvmSchemeConfig holds optional facilitator configuration.
+type BatchSettlementEvmSchemeConfig struct {
+	// EIP6492AllowedFactories is the allowlist of factory contract addresses (hex strings,
+	// case-insensitive) the facilitator will call to deploy an undeployed (ERC-6492
+	// counterfactual) smart wallet before an ERC-3009 deposit. A non-empty list enables
+	// counterfactual deposit support; an empty list (the default) denies all factory
+	// deployment, so counterfactual deposits are rejected with ErrFactoryNotAllowed.
+	EIP6492AllowedFactories []string
+}
+
 // BatchSettlementEvmScheme implements SchemeNetworkFacilitator for batch settlement on EVM.
 type BatchSettlementEvmScheme struct {
 	signer           evm.FacilitatorEvmSigner
 	authorizerSigner batchsettlement.AuthorizerSigner
+	config           BatchSettlementEvmSchemeConfig
 }
 
 // NewBatchSettlementEvmScheme creates a new batch settlement facilitator scheme.
@@ -22,6 +33,21 @@ type BatchSettlementEvmScheme struct {
 // server omits signatures from the payload.
 func NewBatchSettlementEvmScheme(signer evm.FacilitatorEvmSigner, authorizerSigner batchsettlement.AuthorizerSigner) *BatchSettlementEvmScheme {
 	return &BatchSettlementEvmScheme{signer: signer, authorizerSigner: authorizerSigner}
+}
+
+// NewBatchSettlementEvmSchemeWithConfig creates a batch settlement facilitator scheme with
+// optional configuration (e.g. the ERC-6492 factory allowlist for counterfactual deposits).
+// A nil config behaves identically to NewBatchSettlementEvmScheme.
+func NewBatchSettlementEvmSchemeWithConfig(
+	signer evm.FacilitatorEvmSigner,
+	authorizerSigner batchsettlement.AuthorizerSigner,
+	config *BatchSettlementEvmSchemeConfig,
+) *BatchSettlementEvmScheme {
+	s := &BatchSettlementEvmScheme{signer: signer, authorizerSigner: authorizerSigner}
+	if config != nil {
+		s.config = *config
+	}
+	return s
 }
 
 // Scheme returns the scheme identifier.
@@ -71,7 +97,7 @@ func (f *BatchSettlementEvmScheme) Verify(
 			return nil, x402.NewVerifyError(ErrInvalidDepositPayload, "",
 				fmt.Sprintf("failed to parse deposit payload: %s", err))
 		}
-		return VerifyDeposit(ctx, f.signer, depositPayload, requirements, payload.Extensions, fctx)
+		return VerifyDeposit(ctx, f.signer, depositPayload, requirements, payload.Extensions, fctx, f.config.EIP6492AllowedFactories)
 	}
 
 	if batchsettlement.IsVoucherPayload(data) {
@@ -116,7 +142,7 @@ func (f *BatchSettlementEvmScheme) Settle(
 			return nil, x402.NewSettleError(ErrInvalidDepositPayload, "", network, "",
 				fmt.Sprintf("failed to parse deposit payload: %s", err))
 		}
-		return SettleDeposit(ctx, f.signer, depositPayload, requirements, payload.Extensions, fctx)
+		return SettleDeposit(ctx, f.signer, depositPayload, requirements, payload.Extensions, fctx, f.config.EIP6492AllowedFactories)
 	}
 
 	// Enriched refund settle-action (must be checked BEFORE plain claim, since both

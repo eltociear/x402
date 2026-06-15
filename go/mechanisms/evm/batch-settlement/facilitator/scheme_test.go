@@ -23,9 +23,12 @@ type fakeFacilitatorSigner struct {
 	readContract    func(functionName string, args ...interface{}) (interface{}, error)
 	writeContract   func(functionName string, args ...interface{}) (string, error)
 	getCode         func(address string) ([]byte, error)
+	sendTransaction func(to string, data []byte) (string, error)
+	waitForReceipt  func(txHash string) (*evm.TransactionReceipt, error)
 	verifyCalls     int
 	verifyAddrs     []string
 	writeCalls      int
+	sendCalls       int
 }
 
 func (f *fakeFacilitatorSigner) GetAddresses() []string { return f.addresses }
@@ -50,10 +53,17 @@ func (f *fakeFacilitatorSigner) WriteContract(_ context.Context, _ string, _ []b
 	}
 	return "", errors.New("no rpc")
 }
-func (f *fakeFacilitatorSigner) SendTransaction(_ context.Context, _ string, _ []byte) (string, error) {
+func (f *fakeFacilitatorSigner) SendTransaction(_ context.Context, to string, data []byte) (string, error) {
+	f.sendCalls++
+	if f.sendTransaction != nil {
+		return f.sendTransaction(to, data)
+	}
 	return "", errors.New("no rpc")
 }
-func (f *fakeFacilitatorSigner) WaitForTransactionReceipt(_ context.Context, _ string) (*evm.TransactionReceipt, error) {
+func (f *fakeFacilitatorSigner) WaitForTransactionReceipt(_ context.Context, txHash string) (*evm.TransactionReceipt, error) {
+	if f.waitForReceipt != nil {
+		return f.waitForReceipt(txHash)
+	}
 	return nil, errors.New("no rpc")
 }
 func (f *fakeFacilitatorSigner) GetBalance(_ context.Context, _ string, _ string) (*big.Int, error) {
